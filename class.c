@@ -93,17 +93,21 @@ PP(pp_initfield)
 
     PADOFFSET fieldix = aux[0].uv;
 
-    /* Apply per-CV fieldix offset from role composition (see pp_methstart) */
+    /* Apply per-CV fieldix offset from role composition (see pp_methstart).
+     * Only cloned role CVs carry this magic; SvMAGICAL is a cheap bitflag
+     * check that lets regular class methods skip the mg_findext walk. */
     {
         CV *curcv;
         if(LIKELY(CxTYPE(CX_CUR()) == CXt_SUB))
             curcv = CX_CUR()->blk_sub.cv;
         else
             curcv = find_runcv(NULL);
-        const MAGIC *mg = mg_findext((SV *)curcv, PERL_MAGIC_ext,
-                                     &role_field_offset_vtbl);
-        if(mg)
-            fieldix += (PADOFFSET)mg->mg_private;
+        if(UNLIKELY(SvMAGICAL((SV *)curcv))) {
+            const MAGIC *mg = mg_findext((SV *)curcv, PERL_MAGIC_ext,
+                                         &role_field_offset_vtbl);
+            if(mg)
+                fieldix += (PADOFFSET)mg->mg_private;
+        }
     }
 
     SV *val = NULL;
@@ -383,9 +387,11 @@ PP(pp_methstart)
          * Role methods carry role-local field indices in their OP_METHSTART
          * aux; when composed into a class with existing fields, the indices
          * need to be offset. Rather than mutating the shared optree, the
-         * offset is stored as magic on the (cloned) CV. */
+         * offset is stored as magic on the (cloned) CV.
+         * SvMAGICAL is a cheap bitflag check — regular class methods have
+         * no magic on their CV, so they skip the mg_findext walk entirely. */
         PADOFFSET fieldix_offset = 0;
-        {
+        if(UNLIKELY(SvMAGICAL((SV *)curcv))) {
             const MAGIC *mg = mg_findext((SV *)curcv, PERL_MAGIC_ext,
                                          &role_field_offset_vtbl);
             if(mg)
