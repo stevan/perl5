@@ -18,35 +18,25 @@
 #include "XSUB.h"
 
 enum {
-    PADIX_SELF   = 1,
-    PADIX_PARAMS = 2,
+    PADIX_SELF        = 1,
+    PADIX_PARAMS      = 2,
+    PADIX_ROLE_OFFSET = 3,
 };
 
 /* Forward declarations */
 static OP *S_find_op_methstart(pTHX_ OP *o);
 #define find_op_methstart(o)  S_find_op_methstart(aTHX_ o)
 
-/* Magic vtbl used to tag a composed CV with a fieldix offset.
- * When a role method/ADJUST/initfields is composed into a class that already
- * has fields, field indices in the OP_METHSTART aux need to be offset.
- * Rather than mutating the shared optree's aux in place (which breaks
- * when the same role is composed into multiple classes with different
- * offsets), we attach this magic to a cv_clone'd copy of the role CV.
- * pp_methstart and pp_initfield check for this magic and apply the offset
- * at runtime. */
-static const MGVTBL role_field_offset_vtbl = {0};
-
-/* Clone a role CV and attach a fieldix offset for composition.
+/* Clone a role CV and store a fieldix offset in its pad for composition.
  * The clone gets its own padlist (via cv_clone) and shares the optree
- * (via OpREFCNT). The offset is stored as magic, read by pp_methstart
- * and pp_initfield. */
+ * (via OpREFCNT). The offset is stored in pad slot PADIX_ROLE_OFFSET,
+ * read by pp_methstart and pp_initfield at runtime. */
 static CV *
 S_cv_clone_with_field_offset(pTHX_ CV *proto, PADOFFSET offset)
 {
     CV *cv = cv_clone(proto);
-    MAGIC *mg = sv_magicext((SV *)cv, NULL, PERL_MAGIC_ext,
-                            &role_field_offset_vtbl, NULL, 0);
-    mg->mg_private = (U16)offset;
+    PAD *pad1 = PadlistARRAY(CvPADLIST(cv))[1];
+    sv_setuv(PadARRAY(pad1)[PADIX_ROLE_OFFSET], offset);
     return cv;
 }
 #define cv_clone_with_field_offset(proto, offset) \
@@ -93,21 +83,14 @@ PP(pp_initfield)
 
     PADOFFSET fieldix = aux[0].uv;
 
-    /* Apply per-CV fieldix offset from role composition (see pp_methstart).
-     * Only cloned role CVs carry this magic; SvMAGICAL is a cheap bitflag
-     * check that lets regular class methods skip the mg_findext walk. */
+    /* Apply per-CV fieldix offset from role composition.
+     * Cloned role CVs have the offset stored in pad slot PADIX_ROLE_OFFSET.
+     * For non-role CVs this slot is undef (SvIOK false), so the check is
+     * a single flag test — no magic walk needed. */
     {
-        CV *curcv;
-        if(LIKELY(CxTYPE(CX_CUR()) == CXt_SUB))
-            curcv = CX_CUR()->blk_sub.cv;
-        else
-            curcv = find_runcv(NULL);
-        if(UNLIKELY(SvMAGICAL((SV *)curcv))) {
-            const MAGIC *mg = mg_findext((SV *)curcv, PERL_MAGIC_ext,
-                                         &role_field_offset_vtbl);
-            if(mg)
-                fieldix += (PADOFFSET)mg->mg_private;
-        }
+        SV *offset_sv = PAD_SVl(PADIX_ROLE_OFFSET);
+        if(UNLIKELY(SvIOK(offset_sv)))
+            fieldix += SvUVX(offset_sv);
     }
 
     SV *val = NULL;
@@ -386,16 +369,14 @@ PP(pp_methstart)
         /* Check for a per-CV fieldix offset (set during role composition).
          * Role methods carry role-local field indices in their OP_METHSTART
          * aux; when composed into a class with existing fields, the indices
-         * need to be offset. Rather than mutating the shared optree, the
-         * offset is stored as magic on the (cloned) CV.
-         * SvMAGICAL is a cheap bitflag check — regular class methods have
-         * no magic on their CV, so they skip the mg_findext walk entirely. */
+         * need to be offset. The offset is stored in pad slot
+         * PADIX_ROLE_OFFSET. For non-role CVs, the slot is undef (SvIOK
+         * false), so this is a single flag test. */
         PADOFFSET fieldix_offset = 0;
-        if(UNLIKELY(SvMAGICAL((SV *)curcv))) {
-            const MAGIC *mg = mg_findext((SV *)curcv, PERL_MAGIC_ext,
-                                         &role_field_offset_vtbl);
-            if(mg)
-                fieldix_offset = (PADOFFSET)mg->mg_private;
+        {
+            SV *offset_sv = PAD_SVl(PADIX_ROLE_OFFSET);
+            if(UNLIKELY(SvIOK(offset_sv)))
+                fieldix_offset = SvUVX(offset_sv);
         }
         U32 fieldcount = (aux++)->uv;
         U32 max_fieldix = (aux++)->uv + fieldix_offset;
@@ -522,6 +503,9 @@ Perl_class_setup_stash(pTHX_ HV *stash)
 
         padix = pad_add_name_pvs("%(params)", 0, NULL, NULL);
         assert(padix == PADIX_PARAMS);
+
+        padix = pad_add_name_pvs("$(role_offset)", 0, NULL, NULL);
+        assert(padix == PADIX_ROLE_OFFSET);
 
         PERL_UNUSED_VAR(padix);
 
@@ -1621,6 +1605,9 @@ Perl_role_setup_stash(pTHX_ HV *stash)
         padix = pad_add_name_pvs("%(params)", 0, NULL, NULL);
         assert(padix == PADIX_PARAMS);
 
+        padix = pad_add_name_pvs("$(role_offset)", 0, NULL, NULL);
+        assert(padix == PADIX_ROLE_OFFSET);
+
         PERL_UNUSED_VAR(padix);
 
         Newx(aux->xhv_class_suspended_initfields_compcv, 1, struct suspended_compcv);
@@ -1877,6 +1864,12 @@ Perl_class_prepare_method_parse(pTHX_ CV *cv)
 
     padix = pad_add_name_pvs("$self", 0, NULL, NULL);
     assert(padix == PADIX_SELF);
+
+    padix = pad_add_name_pvs("$(params)", 0, NULL, NULL);
+    assert(padix == PADIX_PARAMS);
+
+    padix = pad_add_name_pvs("$(role_offset)", 0, NULL, NULL);
+    assert(padix == PADIX_ROLE_OFFSET);
     PERL_UNUSED_VAR(padix);
 
     intro_my();
@@ -2055,6 +2048,12 @@ apply_field_attribute_reader(pTHX_ PADNAME *pn, SV *value)
     padix = pad_add_name_pvs("$self", 0, NULL, NULL);
     assert(padix == PADIX_SELF);
 
+    padix = pad_add_name_pvs("$(params)", 0, NULL, NULL);
+    assert(padix == PADIX_PARAMS);
+
+    padix = pad_add_name_pvs("$(role_offset)", 0, NULL, NULL);
+    assert(padix == PADIX_ROLE_OFFSET);
+
     subsignature_start();
     CvSIGNATURE_on(PL_compcv);
 
@@ -2122,6 +2121,12 @@ apply_field_attribute_writer(pTHX_ PADNAME *pn, SV *value)
 
     padix = pad_add_name_pvs("$self", 0, NULL, NULL);
     assert(padix == PADIX_SELF);
+
+    padix = pad_add_name_pvs("$(params)", 0, NULL, NULL);
+    assert(padix == PADIX_PARAMS);
+
+    padix = pad_add_name_pvs("$(role_offset)", 0, NULL, NULL);
+    assert(padix == PADIX_ROLE_OFFSET);
 
     subsignature_start();
     CvSIGNATURE_on(PL_compcv);
