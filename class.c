@@ -686,14 +686,10 @@ apply_class_attribute_isa(pTHX_ HV *stash, SV *value)
 }
 
 static void
-apply_class_attribute_does(pTHX_ HV *stash, SV *value)
+S_apply_one_role(pTHX_ HV *stash, struct xpvhv_aux *aux, SV *namesv)
 {
-    assert(HvSTASH_IS_CLASS_OR_ROLE(stash));
-    struct xpvhv_aux *aux = HvAUX(stash);
-
-    /* Parse role name (+ optional version) */
     SV *rolename = sv_newmortal(), *rolever = sv_newmortal();
-    const char *end = split_package_ver(value, rolename, rolever);
+    const char *end = split_package_ver(namesv, rolename, rolever);
     if(*end)
         croak("Unexpected characters while parsing :does attribute: %s", end);
 
@@ -709,11 +705,46 @@ apply_class_attribute_does(pTHX_ HV *stash, SV *value)
     if(rolever && SvOK(rolever))
         ensure_module_version(rolename, rolever);
 
-    /* Just collect the role stash — actual composition is deferred to seal time */
     if(!aux->xhv_class_pending_roles)
         aux->xhv_class_pending_roles = newAV();
 
     av_push(aux->xhv_class_pending_roles, SvREFCNT_inc((SV *)rolestash));
+}
+
+static void
+apply_class_attribute_does(pTHX_ HV *stash, SV *value)
+{
+    assert(HvSTASH_IS_CLASS_OR_ROLE(stash));
+    struct xpvhv_aux *aux = HvAUX(stash);
+
+    /* Support comma-separated list: :does(R1, R2, R3) */
+    const char *p   = SvPVX(value);
+    const char *end = p + SvCUR(value);
+
+    while(p < end) {
+        /* skip leading whitespace and commas */
+        while(p < end && (*p == ',' || isSPACE(*p)))
+            p++;
+        if(p >= end)
+            break;
+
+        /* find end of this entry (up to comma or end) */
+        const char *start = p;
+        while(p < end && *p != ',')
+            p++;
+
+        /* trim trailing whitespace */
+        const char *entry_end = p;
+        while(entry_end > start && isSPACE(*(entry_end - 1)))
+            entry_end--;
+
+        if(entry_end > start) {
+            SV *entry = newSVpvn_flags(start, entry_end - start,
+                                       SvUTF8(value) ? SVf_UTF8 : 0);
+            sv_2mortal(entry);
+            S_apply_one_role(aTHX_ stash, aux, entry);
+        }
+    }
 }
 
 static struct {

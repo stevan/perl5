@@ -95,4 +95,68 @@ package PlainPkg { sub dummy { 1 } }
     like($@, qr/:does attribute requires a role/, 'correct error for :does with plain package');
 }
 
+# :does with comma-separated list
+{
+    role ListR1 {
+        method lr1 { "lr1" }
+    }
+
+    role ListR2 {
+        method lr2 { "lr2" }
+    }
+
+    role ListR3 {
+        method lr3 { "lr3" }
+    }
+
+    class ListConsumer :does(ListR1, ListR2, ListR3) {
+        field $x :param;
+    }
+
+    my $obj = ListConsumer->new(x => 1);
+    is($obj->lr1, 'lr1', ':does list: first role method');
+    is($obj->lr2, 'lr2', ':does list: second role method');
+    is($obj->lr3, 'lr3', ':does list: third role method');
+    ok($obj->DOES('ListR1'), ':does list: DOES first role');
+    ok($obj->DOES('ListR2'), ':does list: DOES second role');
+    ok($obj->DOES('ListR3'), ':does list: DOES third role');
+}
+
+# :does list with fields
+{
+    role LF1 {
+        field $a :param;
+        method a { $a }
+    }
+
+    role LF2 {
+        field $b :param;
+        method b { $b }
+    }
+
+    class LFConsumer :does(LF1, LF2) {
+        field $c :param;
+        method c { $c }
+    }
+
+    my $obj = LFConsumer->new(a => 1, b => 2, c => 3);
+    is($obj->a, 1, ':does list with fields: first role field');
+    is($obj->b, 2, ':does list with fields: second role field');
+    is($obj->c, 3, ':does list with fields: class field');
+}
+
+# :does list with whitespace variations
+{
+    role WS1 { method ws1 { "ws1" } }
+    role WS2 { method ws2 { "ws2" } }
+
+    class WSConsumer :does( WS1 , WS2 ) {
+        field $x :param;
+    }
+
+    my $obj = WSConsumer->new(x => 1);
+    is($obj->ws1, 'ws1', ':does list with whitespace: first role');
+    is($obj->ws2, 'ws2', ':does list with whitespace: second role');
+}
+
 done_testing;
