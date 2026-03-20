@@ -8764,6 +8764,20 @@ Perl_croak_kw_unless_class(pTHX_ const char *kw)
 # define PERL_ARGS_ASSERT_CROAK_KW_UNLESS_CLASS \
         assert(kw)
 
+PERL_CALLCONV void
+Perl_role_seal_stash(pTHX_ HV *stash)
+        Perl_attribute_nonnull_aTHX_
+        Perl_attribute_nonnull_(pTHX_1);
+# define PERL_ARGS_ASSERT_ROLE_SEAL_STASH       \
+        assert(stash); assert(SvTYPE(stash) == SVt_PVHV)
+
+PERL_CALLCONV void
+Perl_role_setup_stash(pTHX_ HV *stash)
+        Perl_attribute_nonnull_aTHX_
+        Perl_attribute_nonnull_(pTHX_1);
+# define PERL_ARGS_ASSERT_ROLE_SETUP_STASH      \
+        assert(stash); assert(SvTYPE(stash) == SVt_PVHV)
+
 #endif /* defined(PERL_IN_CLASS_C) || defined(PERL_IN_OP_C)    ||
           defined(PERL_IN_PAD_C)   || defined(PERL_IN_PERLY_C) ||
           defined(PERL_IN_TOKE_C) */

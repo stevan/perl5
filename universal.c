@@ -327,6 +327,37 @@ Perl_sv_does_sv(pTHX_ SV *sv, SV *namesv, U32 flags)
         return TRUE;
     }
 
+    /* Check if the object's class (or any class in its hierarchy)
+     * composes a role with the given name. This makes DOES() return
+     * true for composed roles without putting them in @ISA. */
+    {
+        HV *objstash = NULL;
+        if (SvROK(sv) && SvOBJECT(SvRV(sv)))
+            objstash = SvSTASH(SvRV(sv));
+        else
+            objstash = gv_stashsv(sv, 0);
+
+        if (objstash && HvSTASH_IS_CLASS_OR_ROLE(objstash)) {
+            HV *target_stash = gv_stashsv(namesv, 0);
+            if (target_stash && HvSTASH_IS_ROLE(target_stash)) {
+                /* Walk the class hierarchy checking xhv_class_roles */
+                HV *walk = objstash;
+                while (walk && HvSTASH_IS_CLASS_OR_ROLE(walk)) {
+                    struct xpvhv_aux *waux = HvAUX(walk);
+                    if (waux->xhv_class_roles) {
+                        for (SSize_t i = 0; i <= AvFILL(waux->xhv_class_roles); i++) {
+                            if ((HV *)AvARRAY(waux->xhv_class_roles)[i] == target_stash) {
+                                LEAVE;
+                                return TRUE;
+                            }
+                        }
+                    }
+                    walk = waux->xhv_class_superclass;
+                }
+            }
+        }
+    }
+
     PUSHMARK(SP);
     EXTEND(SP, 2);
     PUSHs(sv);

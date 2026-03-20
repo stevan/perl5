@@ -147,14 +147,24 @@ struct xpvhv_aux {
 
     struct suspended_compcv
                 *xhv_class_suspended_initfields_compcv;
+
+    AV          *xhv_class_pending_roles;      /* role stashes pending composition */
+    AV          *xhv_class_roles;              /* composed role stashes (for DOES) */
 };
 
 #define HvAUXf_SCAN_STASH   0x1   /* stash is being scanned by gv_check */
 #define HvAUXf_NO_DEREF     0x2   /* @{}, %{} etc (and nomethod) not present */
 #define HvAUXf_IS_CLASS     0x4   /* the package is a 'class' */
+#define HvAUXf_IS_ROLE      0x8   /* the package is a 'role' */
 
 #define HvSTASH_IS_CLASS(hv) \
     (HvHasAUX(hv) && HvAUX(hv)->xhv_aux_flags & HvAUXf_IS_CLASS)
+
+#define HvSTASH_IS_ROLE(hv) \
+    (HvHasAUX(hv) && HvAUX(hv)->xhv_aux_flags & HvAUXf_IS_ROLE)
+
+#define HvSTASH_IS_CLASS_OR_ROLE(hv) \
+    (HvHasAUX(hv) && HvAUX(hv)->xhv_aux_flags & (HvAUXf_IS_CLASS | HvAUXf_IS_ROLE))
 
 /* hash structure: */
 /* This structure must match the beginning of struct xpvmg in sv.h. */

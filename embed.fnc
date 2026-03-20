@@ -4518,6 +4518,9 @@ Cp	|OP *	|class_wrap_method_body 				\
 				|NULLOK OP *o
 Cp	|void	|croak_kw_unless_class					\
 				|NN const char *kw
+Cp	|void	|role_seal_stash|NN HV *stash
+Cp	|void	|role_setup_stash					\
+				|NN HV *stash
 #endif /* defined(PERL_IN_CLASS_C) || defined(PERL_IN_OP_C)    ||
           defined(PERL_IN_PAD_C)   || defined(PERL_IN_PERLY_C) ||
           defined(PERL_IN_TOKE_C) */

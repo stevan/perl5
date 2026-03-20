@@ -28,9 +28,13 @@
 #   undef CC_MAGICAL_
 #   undef CC_UNDERSCORE_
 #   undef do_aexec
+#   undef HvAUXf_IS_ROLE
+#   undef HvSTASH_IS_CLASS_OR_ROLE
+#   undef HvSTASH_IS_ROLE
 #   undef is_WORD_BUT_NONCONT_safe
 #   undef isFOO_or_UNDERSCORE_
 #   undef isIDCONT_lazy_if_safe
+#   undef KEY_role
 #   undef new_XPV
 #   undef new_XPVIV
 #   undef pTHX_10
@@ -2190,6 +2194,8 @@
 #   define class_setup_stash(a)                 Perl_class_setup_stash(aTHX_ a)
 #   define class_wrap_method_body(a)            Perl_class_wrap_method_body(aTHX_ a)
 #   define croak_kw_unless_class(a)             Perl_croak_kw_unless_class(aTHX_ a)
+#   define role_seal_stash(a)                   Perl_role_seal_stash(aTHX_ a)
+#   define role_setup_stash(a)                  Perl_role_setup_stash(aTHX_ a)
 # endif /* defined(PERL_IN_CLASS_C) || defined(PERL_IN_OP_C)    ||
            defined(PERL_IN_PAD_C)   || defined(PERL_IN_PERLY_C) ||
            defined(PERL_IN_TOKE_C) */

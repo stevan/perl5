@@ -53,6 +53,7 @@ my %feature_kw = (
     finally   => 'try',
     defer     => 'defer',
     class     => 'class',
+    role      => 'class',
     field     => 'class',
     method    => 'class',
     ADJUST    => 'class',
@@ -304,6 +305,7 @@ __END__
 -rewinddir
 -rindex
 -rmdir
+-role
 +s
 +say
 +scalar
