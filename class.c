@@ -346,6 +346,9 @@ PP(pp_methstart)
     return NORMAL;
 }
 
+static OP *S_find_op_methstart(pTHX_ OP *o);
+#define find_op_methstart(o)  S_find_op_methstart(aTHX_ o)
+
 static void
 invoke_class_seal(pTHX_ void *arg_)
 {
@@ -398,12 +401,13 @@ Perl_class_setup_stash(pTHX_ HV *stash)
      */
 
     struct xpvhv_aux *aux = HvAUX(stash);
-    aux->xhv_class_superclass    = NULL;
-    aux->xhv_class_initfields_cv = NULL;
-    aux->xhv_class_adjust_blocks = NULL;
-    aux->xhv_class_fields        = NULL;
-    aux->xhv_class_next_fieldix  = 0;
-    aux->xhv_class_param_map     = NULL;
+    aux->xhv_class_superclass         = NULL;
+    aux->xhv_class_initfields_cv      = NULL;
+    aux->xhv_class_adjust_blocks      = NULL;
+    aux->xhv_class_fields             = NULL;
+    aux->xhv_class_next_fieldix       = 0;
+    aux->xhv_class_param_map          = NULL;
+    aux->xhv_class_pending_method_cvs = NULL;
 
     aux->xhv_aux_flags |= HvAUXf_IS_CLASS;
 
@@ -580,7 +584,11 @@ apply_class_attribute_isa(pTHX_ HV *stash, SV *value)
 
     struct xpvhv_aux *superaux = HvAUX(superstash);
 
-    aux->xhv_class_next_fieldix = superaux->xhv_class_next_fieldix;
+    /* Don't copy next_fieldix from the parent here. Field indices are now
+     * assigned as class-relative values during parsing and resolved to
+     * absolute indices at seal time. The base offset from the superclass
+     * will be applied during class_seal_stash().
+     */
 
     if(superaux->xhv_class_adjust_blocks) {
         if(!aux->xhv_class_adjust_blocks)
@@ -683,6 +691,9 @@ S_class_cleanup_definition(pTHX_ HV *stash)
     SvREFCNT_dec(aux->xhv_class_param_map);
     aux->xhv_class_param_map = NULL;
 
+    SvREFCNT_dec(aux->xhv_class_pending_method_cvs);
+    aux->xhv_class_pending_method_cvs = NULL;
+
     /* clean up the ops for defaults for fields, if any, since
        padname_free() doesn't.
     */
@@ -747,6 +758,63 @@ S_class_cleanup_definition(pTHX_ HV *stash)
     aux->xhv_aux_flags &= ~HvAUXf_IS_CLASS;
 }
 
+/* Build the OP_METHSTART field-binding aux for a single method CV.
+ * Scans the CV's pad for field PADNAMEs and builds an aux array of
+ * (padix, fieldix) pairs. Skips CVs whose OP_METHSTART already has aux.
+ */
+#define class_seal_method_fieldmap(cv)  S_class_seal_method_fieldmap(aTHX_ cv)
+static void
+S_class_seal_method_fieldmap(pTHX_ CV *cv)
+{
+    assert(CvROOT(cv));
+
+    OP *methstartop = find_op_methstart(CvROOT(cv));
+    if(!methstartop)
+        return;
+
+    /* Already processed (e.g. found via both pending list and stash walk) */
+    if(cUNOP_AUXx(methstartop)->op_aux)
+        return;
+
+    PADNAMELIST *pnl = PadlistNAMES(CvPADLIST(cv));
+
+    AV *fieldmap = newAV();
+    UV max_fieldix = 0;
+
+    /* padix 0 == @_; padix 1 == $self. Start at 2 */
+    for(PADOFFSET padix = 2; padix <= PadnamelistMAX(pnl); padix++) {
+        PADNAME *pn = PadnamelistARRAY(pnl)[padix];
+        if(!pn || !PadnameIsFIELD(pn))
+            continue;
+
+        U32 fieldix = PadnameFIELDINFO(pn)->fieldix;
+        assert(fieldix != (PADOFFSET)-1); /* must be resolved */
+
+        if(fieldix > max_fieldix)
+            max_fieldix = fieldix;
+
+        av_push_simple(fieldmap, newSVuv(padix));
+        av_push_simple(fieldmap, newSVuv(fieldix));
+    }
+
+    if(av_count(fieldmap)) {
+        UNOP_AUX_item *aux = (UNOP_AUX_item *)PerlMemShared_malloc(
+            sizeof(UNOP_AUX_item) * (2 + av_count(fieldmap)));
+
+        UNOP_AUX_item *ap = aux;
+
+        (ap++)->uv = av_count(fieldmap) / 2;
+        (ap++)->uv = max_fieldix;
+
+        for(Size_t j = 0; j < av_count(fieldmap); j++)
+            (ap++)->uv = SvUV(AvARRAY(fieldmap)[j]);
+
+        cUNOP_AUXx(methstartop)->op_aux = aux;
+    }
+
+    SvREFCNT_dec_NN((SV *)fieldmap);
+}
+
 void
 Perl_class_seal_stash(pTHX_ HV *stash)
 {
@@ -762,7 +830,85 @@ Perl_class_seal_stash(pTHX_ HV *stash)
 
     struct xpvhv_aux *aux = HvAUX(stash);
 
-    /* generate initfields CV */
+    /* Phase 1: Resolve class-relative field indices to absolute indices.
+     * The base offset comes from the superclass's total field count (which
+     * is already resolved because the superclass was sealed before us).
+     * In the future, role fields will also be accounted for here.
+     */
+    {
+        PADOFFSET base_offset = 0;
+        if(aux->xhv_class_superclass) {
+            assert(HvSTASH_IS_CLASS(aux->xhv_class_superclass));
+            struct xpvhv_aux *superaux = HvAUX(aux->xhv_class_superclass);
+            base_offset = superaux->xhv_class_next_fieldix;
+        }
+
+        PADNAMELIST *fieldnames = aux->xhv_class_fields;
+        PADOFFSET own_field_count = 0;
+
+        if(fieldnames) {
+            for(SSize_t i = 0; i <= PadnamelistMAX(fieldnames); i++) {
+                PADNAME *pn = PadnamelistARRAY(fieldnames)[i];
+                struct padname_fieldinfo *fi = PadnameFIELDINFO(pn);
+                assert(fi->fieldix == (PADOFFSET)-1); /* should be unresolved */
+                fi->fieldix = base_offset + fi->relative_fieldix;
+                own_field_count++;
+            }
+        }
+
+        /* Set next_fieldix to the total count (inherited + own).
+         * This is what the constructor uses to size the object.
+         */
+        aux->xhv_class_next_fieldix = base_offset + own_field_count;
+    }
+
+    /* Phase 2: Build the OP_METHSTART field-binding aux for all method CVs.
+     * Field indices are now resolved, so we can build the (padix, fieldix)
+     * pairs that OP_METHSTART needs at runtime.
+     *
+     * We process CVs from two sources:
+     *   (a) The pending_method_cvs list — covers anonymous methods, lexical
+     *       methods, and ADJUST blocks that aren't in the stash.
+     *   (b) A walk of the stash — covers named methods, including those
+     *       whose optree was transferred from PL_compcv to a pre-existing
+     *       CV by newATTRSUB (e.g. forward-declared methods).
+     * The NULL-aux check on OP_METHSTART prevents double-processing.
+     */
+    {
+        /* Process pending (non-stash) method CVs */
+        if(aux->xhv_class_pending_method_cvs) {
+            AV *pending = aux->xhv_class_pending_method_cvs;
+
+            for(SSize_t i = 0; i <= AvFILL(pending); i++) {
+                CV *methcv = (CV *)AvARRAY(pending)[i];
+                if(CvROOT(methcv))
+                    class_seal_method_fieldmap(methcv);
+            }
+
+            SvREFCNT_dec_NN((SV *)pending);
+            aux->xhv_class_pending_method_cvs = NULL;
+        }
+
+        /* Also walk the stash for named method CVs (catches forward-declared
+         * methods where newATTRSUB transferred the optree to the existing CV)
+         */
+        if(hv_iterinit(stash)) {
+            HE *he;
+            while((he = hv_iternext(stash)) != NULL) {
+                SV *entry = HeVAL(he);
+                CV *cv = NULL;
+                if(SvTYPE(entry) == SVt_PVGV)
+                    cv = GvCV((GV *)entry);
+                else if(SvROK(entry) && SvTYPE(SvRV(entry)) == SVt_PVCV)
+                    cv = (CV *)SvRV(entry);
+
+                if(cv && CvIsMETHOD(cv) && CvROOT(cv))
+                    class_seal_method_fieldmap(cv);
+            }
+        }
+    }
+
+    /* Phase 3: Generate initfields CV */
     I32 floor_ix = PL_savestack_ix;
     SAVEI32(PL_subline);
     save_item(PL_subname);
@@ -959,7 +1105,6 @@ Perl_class_prepare_method_parse(pTHX_ CV *cv)
     CvIsMETHOD_on(cv);
 }
 
-#define find_op_methstart(o)  S_find_op_methstart(aTHX_ o)
 static OP *
 S_find_op_methstart(pTHX_ OP *o)
 {
@@ -986,49 +1131,10 @@ Perl_class_wrap_method_body(pTHX_ OP *o)
     if(!o)
         return o;
 
-    /* Walk the pad of this CV looking for lexicals with field info. These
-     * will be the fields used by this particular method, which we build into
-     * a list for the OP_METHSTART op. This ensures we only set up the fields
-     * needed by this particular method body, rather than every available
-     * field in the whole class
+    /* Field indices are not yet resolved (they are class-relative at this
+     * point). We insert the OP_METHSTART with NULL aux and record this CV
+     * for fixup at seal time, when absolute field indices are known.
      */
-
-    PADNAMELIST *pnl = PadlistNAMES(CvPADLIST(PL_compcv));
-
-    AV *fieldmap = newAV();
-    UV max_fieldix = 0;
-    SAVEFREESV((SV *)fieldmap);
-
-    /* padix 0 == @_; padix 1 == $self. Start at 2 */
-    for(PADOFFSET padix = 2; padix <= PadnamelistMAX(pnl); padix++) {
-        PADNAME *pn = PadnamelistARRAY(pnl)[padix];
-        if(!pn || !PadnameIsFIELD(pn))
-            continue;
-
-        U32 fieldix = PadnameFIELDINFO(pn)->fieldix;
-        if(fieldix > max_fieldix)
-            max_fieldix = fieldix;
-
-        av_push_simple(fieldmap, newSVuv(padix));
-        av_push_simple(fieldmap, newSVuv(fieldix));
-    }
-
-    UNOP_AUX_item *aux = NULL;
-
-    if(av_count(fieldmap)) {
-        aux = (UNOP_AUX_item *)PerlMemShared_malloc(
-                                    sizeof(UNOP_AUX_item)
-                                    *  (2 + av_count(fieldmap))
-                                );
-
-        UNOP_AUX_item *ap = aux;
-
-        (ap++)->uv = av_count(fieldmap) / 2;
-        (ap++)->uv = max_fieldix;
-
-        for(Size_t i = 0; i < av_count(fieldmap); i++)
-            (ap++)->uv = SvUV(AvARRAY(fieldmap)[i]);
-    }
 
     /* If this is an empty method body then o will be an OP_STUB and not a
      * list. This will confuse op_sibling_splice() */
@@ -1036,17 +1142,29 @@ Perl_class_wrap_method_body(pTHX_ OP *o)
         o = newLISTOP(OP_LINESEQ, 0, o, NULL);
 
     if(CvSIGNATURE(PL_compcv)) {
-        /* A signatured method has already injected the OP_METHSTART; we just
-         * have to find it and attach the aux structure to it
+        /* A signatured method has already injected the OP_METHSTART;
+         * leave its aux as NULL for now. Just assert it exists.
          */
+#ifdef DEBUGGING
         OP *methstartop = find_op_methstart(o);
         assert(methstartop);
         assert(!cUNOP_AUXx(methstartop)->op_aux);
-
-        cUNOP_AUXx(methstartop)->op_aux = aux;
+#endif
     }
     else
-        op_sibling_splice(o, NULL, 0, newUNOP_AUX(OP_METHSTART, 0, NULL, aux));
+        op_sibling_splice(o, NULL, 0, newUNOP_AUX(OP_METHSTART, 0, NULL, NULL));
+
+    /* Record this method CV for field binding fixup at class seal time */
+    {
+        assert(HvSTASH_IS_CLASS(PL_curstash));
+        struct xpvhv_aux *aux = HvAUX(PL_curstash);
+
+        if(!aux->xhv_class_pending_method_cvs)
+            aux->xhv_class_pending_method_cvs = newAV();
+
+        av_push(aux->xhv_class_pending_method_cvs,
+                SvREFCNT_inc_simple_NN((SV *)PL_compcv));
+    }
 
     return o;
 }
@@ -1059,14 +1177,15 @@ Perl_class_add_field(pTHX_ HV *stash, PADNAME *pn)
     assert(HvSTASH_IS_CLASS(stash));
     struct xpvhv_aux *aux = HvAUX(stash);
 
-    PADOFFSET fieldix = aux->xhv_class_next_fieldix;
+    PADOFFSET relative_fieldix = aux->xhv_class_next_fieldix;
     aux->xhv_class_next_fieldix++;
 
     struct padname_fieldinfo *fieldinfo;
     Newxz(fieldinfo, 1, struct padname_fieldinfo);
 
     fieldinfo->refcount = 1;
-    fieldinfo->fieldix = fieldix;
+    fieldinfo->relative_fieldix = relative_fieldix;
+    fieldinfo->fieldix = (PADOFFSET)-1; /* sentinel; resolved at seal time */
     fieldinfo->fieldstash = HvREFCNT_inc(stash);
 
     PadnameFIELDINFO(pn) = fieldinfo;
@@ -1126,7 +1245,11 @@ apply_field_attribute_param(pTHX_ PADNAME *pn, SV *value)
     if(!aux->xhv_class_param_map)
         aux->xhv_class_param_map = newHV();
 
-    (void)hv_store_ent(aux->xhv_class_param_map, value, newSVuv(PadnameFIELDINFO(pn)->fieldix), 0);
+    /* Store into param_map for duplicate checking. The value is not
+     * meaningful at this point (fieldix is unresolved); only the key's
+     * existence matters for the duplicate check above.
+     */
+    (void)hv_store_ent(aux->xhv_class_param_map, value, newSVuv(0), 0);
 }
 
 static void

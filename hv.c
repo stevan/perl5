@@ -2390,6 +2390,7 @@ Perl_hv_undef_flags(pTHX_ HV *hv, U32 flags)
           if(aux->xhv_class_fields)
             PadnamelistREFCNT_dec(aux->xhv_class_fields);
           SvREFCNT_dec(aux->xhv_class_param_map);
+          SvREFCNT_dec(aux->xhv_class_pending_method_cvs);
           Safefree(aux->xhv_class_suspended_initfields_compcv);
           aux->xhv_class_suspended_initfields_compcv = NULL;
 

@@ -15451,6 +15451,8 @@ S_sv_dup_hvaux(pTHX_ const SV *const ssv, SV *dsv, CLONE_PARAMS *const param)
         daux->xhv_class_fields        = padnamelist_dup_inc(saux->xhv_class_fields, param);
         daux->xhv_class_next_fieldix  = saux->xhv_class_next_fieldix;
         daux->xhv_class_param_map     = hv_dup_inc(saux->xhv_class_param_map,     param);
+        /* pending_method_cvs is compile-time only; should be NULL after sealing */
+        daux->xhv_class_pending_method_cvs = NULL;
 
         /* TODO: This does mean that we can't compile more `field` expressions
          * in the cloned thread, but surely we're done with compiletime now..?

@@ -143,6 +143,7 @@ struct xpvhv_aux {
     PADNAMELIST *xhv_class_fields;             /* PADNAMEs with PadnameIsFIELD() */
     PADOFFSET    xhv_class_next_fieldix;
     HV          *xhv_class_param_map;          /* Maps param names to field index stored in UV */
+    AV          *xhv_class_pending_method_cvs; /* method CVs needing field binding at seal time */
 
     struct suspended_compcv
                 *xhv_class_suspended_initfields_compcv;
