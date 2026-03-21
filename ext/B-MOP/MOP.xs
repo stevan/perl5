@@ -16,8 +16,23 @@
 #include "perl.h"
 #include "XSUB.h"
 
+/* These macros are #undef'd in embed.h for non-PERL_CORE builds,
+ * but we need them for role introspection. Re-define them here. */
+#ifndef HvAUXf_IS_ROLE
+#  define HvAUXf_IS_ROLE 0x8
+#endif
+#ifndef HvSTASH_IS_ROLE
+#  define HvSTASH_IS_ROLE(hv) \
+    (HvHasAUX(hv) && HvAUX(hv)->xhv_aux_flags & HvAUXf_IS_ROLE)
+#endif
+#ifndef HvSTASH_IS_CLASS_OR_ROLE
+#  define HvSTASH_IS_CLASS_OR_ROLE(hv) \
+    (HvHasAUX(hv) && HvAUX(hv)->xhv_aux_flags & (HvAUXf_IS_CLASS | HvAUXf_IS_ROLE))
+#endif
+
 /* Pointer typedefs — XS maps B__MOP__Class to B::MOP::Class etc. */
 typedef HV      *B__MOP__Class;
+typedef HV      *B__MOP__Role;
 typedef PADNAME *B__MOP__Field;
 typedef CV      *B__MOP__Method;
 
@@ -36,6 +51,15 @@ make_field_object(pTHX_ PADNAME *pn)
 {
     SV *obj = sv_newmortal();
     sv_setiv(newSVrv(obj, "B::MOP::Field"), PTR2IV(pn));
+    return obj;
+}
+
+/* Helper: wrap an HV* role stash as a B::MOP::Role */
+static SV *
+make_role_object(pTHX_ HV *stash)
+{
+    SV *obj = sv_newmortal();
+    sv_setiv(newSVrv(obj, "B::MOP::Role"), PTR2IV(stash));
     return obj;
 }
 
@@ -76,6 +100,27 @@ PPCODE:
         croak("'%" SVf "' is not a class", SVfARG(name_or_obj));
 
     PUSHs(make_class_object(aTHX_ stash));
+}
+
+void
+for_role(pkg, name_sv)
+    SV *pkg
+    SV *name_sv
+PPCODE:
+{
+    HV *stash;
+
+    PERL_UNUSED_VAR(pkg);
+
+    stash = gv_stashsv(name_sv, 0);
+
+    if (!stash)
+        croak("No such role '%" SVf "'", SVfARG(name_sv));
+
+    if (!HvSTASH_IS_ROLE(stash))
+        croak("'%" SVf "' is not a role", SVfARG(name_sv));
+
+    PUSHs(make_role_object(aTHX_ stash));
 }
 
 MODULE = B::MOP    PACKAGE = B::MOP::Class
@@ -166,6 +211,25 @@ PPCODE:
 }
 
 void
+roles(self)
+    B::MOP::Class self
+PPCODE:
+{
+    struct xpvhv_aux *aux = HvAUX(self);
+    AV *roles = aux->xhv_class_roles;
+    if (roles) {
+        SSize_t i, max = av_count(roles);
+        for (i = 0; i < max; i++) {
+            SV **svp = av_fetch(roles, i, 0);
+            if (svp && *svp) {
+                HV *role_stash = (HV *)*svp;
+                PUSHs(make_role_object(aTHX_ role_stash));
+            }
+        }
+    }
+}
+
+void
 stash(self)
     B::MOP::Class self
 PPCODE:
@@ -205,7 +269,13 @@ void
 class(self)
     B::MOP::Field self
 PPCODE:
-    PUSHs(make_class_object(aTHX_ PadnameFIELDINFO(self)->fieldstash));
+{
+    HV *stash = PadnameFIELDINFO(self)->fieldstash;
+    if (stash && HvSTASH_IS_ROLE(stash))
+        PUSHs(make_role_object(aTHX_ stash));
+    else
+        PUSHs(make_class_object(aTHX_ stash));
+}
 
 void
 param_name(self)
@@ -248,7 +318,9 @@ class(self)
 PPCODE:
 {
     HV *stash = CvSTASH(self);
-    if (stash && HvSTASH_IS_CLASS(stash))
+    if (stash && HvSTASH_IS_ROLE(stash))
+        PUSHs(make_role_object(aTHX_ stash));
+    else if (stash && HvSTASH_IS_CLASS(stash))
         PUSHs(make_class_object(aTHX_ stash));
     else
         PUSHs(&PL_sv_undef);
@@ -262,4 +334,136 @@ PPCODE:
     SV *obj = sv_newmortal();
     sv_setiv(newSVrv(obj, "B::CV"), PTR2IV(self));
     PUSHs(obj);
+}
+
+MODULE = B::MOP    PACKAGE = B::MOP::Role
+
+SV *
+name(self)
+    B::MOP::Role self
+CODE:
+    RETVAL = newSVhek(HvNAME_HEK(self));
+OUTPUT:
+    RETVAL
+
+void
+fields(self)
+    B::MOP::Role self
+PPCODE:
+{
+    struct xpvhv_aux *aux = HvAUX(self);
+    PADNAMELIST *fieldnames = aux->xhv_class_fields;
+    if (fieldnames) {
+        PADNAME **pnp = PadnamelistARRAY(fieldnames);
+        SSize_t i, max = PadnamelistMAX(fieldnames);
+        for (i = 0; i <= max; i++) {
+            PADNAME *pn = pnp[i];
+            if (pn && PadnameIsFIELD(pn))
+                PUSHs(make_field_object(aTHX_ pn));
+        }
+    }
+}
+
+void
+methods(self)
+    B::MOP::Role self
+PPCODE:
+{
+    HE *he;
+    (void)hv_iterinit(self);
+    while ((he = hv_iternext(self))) {
+        SV *val = HeVAL(he);
+        CV *cv = NULL;
+        if (!val)
+            continue;
+        if (SvTYPE(val) == SVt_PVGV && isGV_with_GP(val)) {
+            cv = GvCV((GV *)val);
+        }
+        else if (SvROK(val) && SvTYPE(SvRV(val)) == SVt_PVCV) {
+            cv = (CV *)SvRV(val);
+        }
+        if (cv && CvIsMETHOD(cv)) {
+            PUSHs(make_method_object(aTHX_ cv));
+        }
+    }
+}
+
+void
+roles(self)
+    B::MOP::Role self
+PPCODE:
+{
+    struct xpvhv_aux *aux = HvAUX(self);
+    AV *roles = aux->xhv_class_roles;
+    if (roles) {
+        SSize_t i, max = av_count(roles);
+        for (i = 0; i < max; i++) {
+            SV **svp = av_fetch(roles, i, 0);
+            if (svp && *svp) {
+                HV *role_stash = (HV *)*svp;
+                PUSHs(make_role_object(aTHX_ role_stash));
+            }
+        }
+    }
+}
+
+void
+adjust_blocks(self)
+    B::MOP::Role self
+PPCODE:
+{
+    struct xpvhv_aux *aux = HvAUX(self);
+    AV *adjusts = aux->xhv_class_adjust_blocks;
+    if (adjusts) {
+        SSize_t i, max = av_count(adjusts);
+        for (i = 0; i < max; i++) {
+            SV **svp = av_fetch(adjusts, i, 0);
+            if (svp && *svp) {
+                SV *obj = sv_newmortal();
+                sv_setiv(newSVrv(obj, "B::CV"), PTR2IV(*svp));
+                PUSHs(obj);
+            }
+        }
+    }
+}
+
+void
+stash(self)
+    B::MOP::Role self
+PPCODE:
+{
+    SV *obj = sv_newmortal();
+    sv_setiv(newSVrv(obj, "B::HV"), PTR2IV(self));
+    PUSHs(obj);
+}
+
+void
+required_methods(self)
+    B::MOP::Role self
+PPCODE:
+{
+    HE *he;
+    (void)hv_iterinit(self);
+    while ((he = hv_iternext(self))) {
+        SV *val = HeVAL(he);
+        CV *cv = NULL;
+        if (!val)
+            continue;
+        if (SvTYPE(val) == SVt_PVGV && isGV_with_GP(val)) {
+            cv = GvCV((GV *)val);
+        }
+        else if (SvROK(val) && SvTYPE(SvRV(val)) == SVt_PVCV) {
+            cv = (CV *)SvRV(val);
+        }
+        if (cv && CvIsMETHOD(cv) && !CvROOT(cv) && !CvXSUB(cv)) {
+            SV *name;
+            if (CvNAMED(cv))
+                name = newSVhek(CvNAME_HEK(cv));
+            else if (CvGV(cv))
+                name = newSVpv(GvNAME(CvGV(cv)), 0);
+            else
+                continue;
+            PUSHs(sv_2mortal(name));
+        }
+    }
 }

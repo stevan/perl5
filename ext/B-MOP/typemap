@@ -1,6 +1,7 @@
 TYPEMAP
 
 B::MOP::Class	T_MOP_OBJ
+B::MOP::Role	T_MOP_OBJ
 B::MOP::Field	T_MOP_OBJ
 B::MOP::Method	T_MOP_OBJ
 
