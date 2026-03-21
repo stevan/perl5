@@ -6822,6 +6822,94 @@ Perl_vivify_ref(pTHX_ SV *sv, U32 to_what)
     return sv;
 }
 
+/* Autobox type constants */
+#define AUTOBOX_NUMBER  0
+#define AUTOBOX_STRING  1
+#define AUTOBOX_ARRAY   2
+#define AUTOBOX_HASH    3
+#define AUTOBOX_CODE    4
+#define AUTOBOX_UNDEF   5
+
+/* Classify an SV for autobox dispatch.
+ * Returns type constant, or -1 if not autoboxable.
+ * Uses same checks as builtin::created_as_number / created_as_string */
+static int
+S_autobox_classify(pTHX_ SV *sv)
+{
+    if (SvROK(sv)) {
+        SV *rv = SvRV(sv);
+        switch (SvTYPE(rv)) {
+            case SVt_PVAV: return AUTOBOX_ARRAY;
+            case SVt_PVHV: return AUTOBOX_HASH;
+            case SVt_PVCV: return AUTOBOX_CODE;
+            default:       return -1;
+        }
+    }
+    else if (!SvOK(sv)) {
+        return AUTOBOX_UNDEF;
+    }
+    else if (SvNIOK(sv) && !SvPOK(sv) && !SvIsBOOL(sv)) {
+        return AUTOBOX_NUMBER;
+    }
+    else if (SvPOK(sv) && !SvIsBOOL(sv)) {
+        return AUTOBOX_STRING;
+    }
+    return -1;
+}
+
+/* Map autobox type to hints key */
+static const char * const autobox_type_keys[] = {
+    "autobox/NUMBER",
+    "autobox/STRING",
+    "autobox/ARRAY",
+    "autobox/HASH",
+    "autobox/CODE",
+    "autobox/UNDEF",
+};
+
+static HV *
+S_autobox_dispatch_stash(pTHX_ int type)
+{
+    SV *hint;
+    assert(type >= 0 && type <= AUTOBOX_UNDEF);
+
+    hint = cop_hints_fetch_pvn(PL_curcop,
+        autobox_type_keys[type], strlen(autobox_type_keys[type]), 0, 0);
+
+    if (hint && SvOK(hint) && SvPOK(hint)) {
+        /* Hint is a stash name string — resolve to HV* */
+        STRLEN len;
+        const char *name = SvPV(hint, len);
+        HV *stash = gv_stashpvn(name, len, GV_ADD);
+        if (stash) {
+            /* Ensure dispatch stash is marked as autobox */
+            if (HvHasAUX(stash))
+                HvAUX(stash)->xhv_aux_flags |= HvAUXf_IS_AUTOBOX;
+            /* Also mark the CvSTASH of methods in this stash so that
+             * pp_methstart can recognize autobox context via CvSTASH.
+             * This is needed because aliased CVs retain their original
+             * CvSTASH (the role stash where they were defined). */
+            {
+                HE *he;
+                (void)hv_iterinit(stash);
+                while ((he = hv_iternext(stash))) {
+                    SV *val = HeVAL(he);
+                    CV *cv = NULL;
+                    if (!val) continue;
+                    if (SvTYPE(val) == SVt_PVGV && isGV_with_GP(val))
+                        cv = GvCV((GV *)val);
+                    else if (SvROK(val) && SvTYPE(SvRV(val)) == SVt_PVCV)
+                        cv = (CV *)SvRV(val);
+                    if (cv && CvSTASH(cv) && HvHasAUX(CvSTASH(cv)))
+                        HvAUX(CvSTASH(cv))->xhv_aux_flags |= HvAUXf_IS_AUTOBOX;
+                }
+            }
+            return stash;
+        }
+    }
+    return NULL;
+}
+
 PERL_STATIC_INLINE HV *
 S_opmethod_stash(pTHX_ SV* meth)
 {
@@ -6849,7 +6937,19 @@ S_opmethod_stash(pTHX_ SV* meth)
 
     if (SvROK(sv))
         ob = MUTABLE_SV(SvRV(sv));
-    else if (!SvOK(sv)) goto undefined;
+    else if (!SvOK(sv)) {
+        /* Check if autobox is active for undef */
+        SV *autobox_hint = cop_hints_fetch_pvs(PL_curcop, "autobox", 0);
+        if (autobox_hint && SvTRUE(autobox_hint)) {
+            int autobox_type = S_autobox_classify(aTHX_ sv);
+            if (autobox_type >= 0) {
+                HV *dispatch_stash = S_autobox_dispatch_stash(aTHX_ autobox_type);
+                if (dispatch_stash)
+                    return dispatch_stash;
+            }
+        }
+        goto undefined;
+    }
     else if (isGV_with_GP(sv)) {
         if (!GvIO(sv))
             croak("Can't call method \"%" SVf "\" "
@@ -6876,6 +6976,19 @@ S_opmethod_stash(pTHX_ SV* meth)
 #endif
     }
     else {
+        /* check for autobox before treating as package name,
+         * so that strings and numbers can be autoboxed */
+        {
+            SV *autobox_hint = cop_hints_fetch_pvs(PL_curcop, "autobox", 0);
+            if (autobox_hint && SvTRUE(autobox_hint)) {
+                int autobox_type = S_autobox_classify(aTHX_ sv);
+                if (autobox_type >= 0) {
+                    HV *dispatch_stash = S_autobox_dispatch_stash(aTHX_ autobox_type);
+                    if (dispatch_stash)
+                        return dispatch_stash;
+                }
+            }
+        }
         /* this isn't a reference */
         GV* iogv;
         STRLEN packlen;
@@ -6924,6 +7037,16 @@ S_opmethod_stash(pTHX_ SV* meth)
                      && (ob = MUTABLE_SV(GvIO((const GV *)ob)))
                      && SvOBJECT(ob))))
     {
+        /* Check if autobox is active for unblessed references */
+        SV *autobox_hint = cop_hints_fetch_pvs(PL_curcop, "autobox", 0);
+        if (autobox_hint && SvTRUE(autobox_hint)) {
+            int autobox_type = S_autobox_classify(aTHX_ sv);
+            if (autobox_type >= 0) {
+                HV *dispatch_stash = S_autobox_dispatch_stash(aTHX_ autobox_type);
+                if (dispatch_stash)
+                    return dispatch_stash;
+            }
+        }
         croak("Can't call method \"%" SVf "\" on unblessed reference",
                    SVfARG((SvPOK(meth) && SvPVX(meth) == PL_isa_DOES)
                                         ? newSVpvs_flags("DOES", SVs_TEMP)

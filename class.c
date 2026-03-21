@@ -341,6 +341,35 @@ PP(pp_methstart)
     if(!SvROK(self) ||
         !SvOBJECT((rv = SvRV(self))) ||
         SvTYPE(rv) != SVt_PVOBJ) {
+        /* Not a class instance — check if autobox dispatch is active.
+         * Two checks: (1) CvSTASH has HvAUXf_IS_AUTOBOX set (fast, reliable),
+         * (2) fallback: check caller's cop hints (PL_curcop may still point
+         *     at the callsite before the first OP_NEXTSTATE). */
+        bool is_autobox = FALSE;
+        if (CvSTASH(curcv) && HvSTASH_IS_AUTOBOX(CvSTASH(curcv)))
+            is_autobox = TRUE;
+        else {
+            SV *autobox_hint = cop_hints_fetch_pvs(PL_curcop, "autobox", 0);
+            if (autobox_hint && SvTRUE(autobox_hint))
+                is_autobox = TRUE;
+        }
+
+        if (is_autobox) {
+            /* Autobox: $self is the raw value, skip type checking */
+            if (!self_in_pad) {
+                save_clearsv(&PAD_SVl(PADIX_SELF));
+                sv_setsv(PAD_SVl(PADIX_SELF), self);
+            }
+
+            if (!self_in_pad) {
+                self = av_shift(GvAV(PL_defgv));
+                if (AvREAL(GvAV(PL_defgv)))
+                    SvREFCNT_dec_NN(self);
+            }
+
+            return NORMAL;
+        }
+
         HEK *namehek = CvGvNAME_HEK(curcv);
         croak(
             namehek ? "Cannot invoke method %" HEKf_QUOTEDPREFIX " on a non-instance" :

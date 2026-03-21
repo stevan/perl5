@@ -157,6 +157,7 @@ struct xpvhv_aux {
 #define HvAUXf_IS_CLASS     0x4   /* the package is a 'class' */
 #define HvAUXf_IS_ROLE      0x8   /* the package is a 'role' */
 #define HvAUXf_IS_CLASS_SEALED 0x10 /* the class has been sealed */
+#define HvAUXf_IS_AUTOBOX   0x20  /* the package is an autobox dispatch stash */
 
 #define HvSTASH_IS_CLASS(hv) \
     (HvHasAUX(hv) && HvAUX(hv)->xhv_aux_flags & HvAUXf_IS_CLASS)
@@ -168,6 +169,9 @@ struct xpvhv_aux {
 
 #define HvSTASH_IS_CLASS_OR_ROLE(hv) \
     (HvHasAUX(hv) && HvAUX(hv)->xhv_aux_flags & (HvAUXf_IS_CLASS | HvAUXf_IS_ROLE))
+
+#define HvSTASH_IS_AUTOBOX(hv) \
+    (HvHasAUX(hv) && HvAUX(hv)->xhv_aux_flags & HvAUXf_IS_AUTOBOX)
 
 /* hash structure: */
 /* This structure must match the beginning of struct xpvmg in sv.h. */
