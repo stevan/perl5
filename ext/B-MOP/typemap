@@ -1,0 +1,16 @@
+TYPEMAP
+
+B::MOP::Class	T_MOP_OBJ
+B::MOP::Field	T_MOP_OBJ
+B::MOP::Method	T_MOP_OBJ
+
+PADOFFSET	T_UV
+
+INPUT
+T_MOP_OBJ
+	if (SvROK($arg)) {
+	    IV tmp = SvIV((SV*)SvRV($arg));
+	    $var = INT2PTR($type,tmp);
+	}
+	else
+	    croak(\"$var is not a reference\")
