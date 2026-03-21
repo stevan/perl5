@@ -156,9 +156,12 @@ struct xpvhv_aux {
 #define HvAUXf_NO_DEREF     0x2   /* @{}, %{} etc (and nomethod) not present */
 #define HvAUXf_IS_CLASS     0x4   /* the package is a 'class' */
 #define HvAUXf_IS_ROLE      0x8   /* the package is a 'role' */
+#define HvAUXf_IS_CLASS_SEALED 0x10 /* the class has been sealed */
 
 #define HvSTASH_IS_CLASS(hv) \
     (HvHasAUX(hv) && HvAUX(hv)->xhv_aux_flags & HvAUXf_IS_CLASS)
+#define HvSTASH_IS_CLASS_SEALED(hv) \
+    (HvHasAUX(hv) && HvAUX(hv)->xhv_aux_flags & HvAUXf_IS_CLASS_SEALED)
 
 #define HvSTASH_IS_ROLE(hv) \
     (HvHasAUX(hv) && HvAUX(hv)->xhv_aux_flags & HvAUXf_IS_ROLE)

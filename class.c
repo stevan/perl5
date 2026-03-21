@@ -635,8 +635,8 @@ apply_class_attribute_isa(pTHX_ HV *stash, SV *value)
     }
     if(!superstash || !HvSTASH_IS_CLASS(superstash))
         /* TODO: This would be a useful feature addition */
-        croak("Class :isa attribute requires a class but %" HvNAMEf_QUOTEDPREFIX " is not one",
-            HvNAMEfARG(superstash));
+        croak("Class :isa attribute requires a class but %" SVf_QUOTEDPREFIX " is not one",
+            SVfARG(superclassname));
 
     if(superclassver && SvOK(superclassver))
         ensure_module_version(superclassname, superclassver);
@@ -1303,6 +1303,12 @@ Perl_class_seal_stash(pTHX_ HV *stash)
 
     assert(HvSTASH_IS_CLASS(stash));
 
+    /* If this class has already been sealed (e.g. sealed on-demand by a
+     * subclass before our SAVEDESTRUCTOR fires), nothing to do.
+     */
+    if(HvSTASH_IS_CLASS_SEALED(stash))
+        return;
+
     if (PL_parser->error_count) {
         /* we had errors, clean up */
         class_cleanup_definition(stash);
@@ -1310,6 +1316,13 @@ Perl_class_seal_stash(pTHX_ HV *stash)
     }
 
     struct xpvhv_aux *aux = HvAUX(stash);
+
+    /* If our superclass hasn't been sealed yet (e.g. it was declared with
+     * unit syntax `class A;` and its SAVEDESTRUCTOR hasn't fired), seal it
+     * now. We need its field count and initfields CV to be available.
+     */
+    if(aux->xhv_class_superclass && !HvSTASH_IS_CLASS_SEALED(aux->xhv_class_superclass))
+        Perl_class_seal_stash(aTHX_ aux->xhv_class_superclass);
 
     /* Initialize next_fieldix from superclass before role composition.
      * During parsing, next_fieldix counted our own fields. Now we repurpose
@@ -1577,6 +1590,8 @@ Perl_class_seal_stash(pTHX_ HV *stash)
     CvIsMETHOD_on(initfields);
 
     aux->xhv_class_initfields_cv = initfields;
+
+    aux->xhv_aux_flags |= HvAUXf_IS_CLASS_SEALED;
 }
 
 void
