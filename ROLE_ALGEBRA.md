@@ -758,7 +758,169 @@ its existing `UNIVERSAL::DOES` behavior (backwards compatible).
 
 ---
 
-## 10. Algebraic Properties Summary
+## 10. `:aliases` and `:excludes` — Pre-Composition Transforms
+
+### 10.1 Motivation
+
+The original traits paper acknowledges that aliasing and exclusion
+break the role contract. In practice, large-scale Perl codebases
+have shown that these are sometimes necessary — when doing it "the
+right way" (fixing the roles themselves) is either impossible
+(third-party code) or needs to be deferred until later.
+
+These operations are **not part of the composition algebra**. The
+algebra (§2–§5) remains clean and total — it knows nothing about
+aliases or exclusions. Instead, `:aliases` and `:excludes` are
+**pre-composition transforms** applied during the class consumption
+process. They modify the view of a role's interface *before* that
+interface enters the composition pipeline.
+
+### 10.2 Syntax
+
+`:aliases` and `:excludes` are class-level attributes, separate
+from `:does`, and only valid when `:does` is present:
+
+```perl
+class Foo :does(Bar, Baz)
+          :aliases(Bar::baz => bar_baz)
+          :excludes(Baz::gorch)
+{
+    ...
+}
+```
+
+Both attributes are qualified with the role name (`Bar::baz`, not
+just `baz`) to make explicit which role is being modified. This
+avoids ambiguity when multiple roles provide methods with the same
+name.
+
+Multiple aliases or exclusions can be specified:
+
+```perl
+class Foo :does(Bar, Baz)
+          :aliases(Bar::baz => bar_baz, Bar::quux => bar_quux)
+          :excludes(Baz::gorch, Baz::wibble)
+{
+    ...
+}
+```
+
+### 10.3 Semantics
+
+`:aliases` and `:excludes` are applied **after** the roles are
+loaded but **before** they enter composition. They transform the
+role's interface as seen by the composition algorithm:
+
+**`:excludes(Role::method)`**
+Removes `method` from Role's method map and replaces it with
+`Required(method)`. The method is no longer provided by the role,
+but the obligation remains — the class (or another role) must
+provide it. This is exactly how the original traits paper defines
+exclusion: "suppresses these methods and turns them into
+requirements."
+
+```
+Before: Role = { method: Defined(method, Role), ... }
+After:  Role = { method: Required(method), ... }
+```
+
+**`:aliases(Role::method => new_name)`**
+Adds a copy of `method` under `new_name` in Role's method map.
+The original method is **not removed** — aliasing creates an
+additional entry, not a rename. (This matches the original traits
+paper: "aliasing just establishes an alternative name without
+affecting the original one.") If the intent is to alias and then
+exclude the original, both must be specified:
+
+```perl
+class Foo :does(Bar, Baz)
+          :aliases(Bar::baz => bar_baz)
+          :excludes(Bar::baz)
+{
+    ...
+}
+```
+
+The alias has the same origin as the original method (it is the
+same CV), so diamond deduplication still works correctly.
+
+```
+Before: Role = { baz: Defined(baz, Bar), ... }
+After:  Role = { baz: Required(baz), bar_baz: Defined(bar_baz, Bar), ... }
+```
+
+### 10.4 Effect on `->does` and `->DOES`
+
+`:aliases` and `:excludes` break the role contract. This is
+reflected in the `->does` / `->DOES` distinction:
+
+```perl
+role Bar {
+    method baz { "Bar::baz" }
+    method quux { "Bar::quux" }
+}
+
+class Foo :does(Bar) :excludes(Bar::baz) {
+    method baz { "Foo::baz" }   # must provide, since excluded → Required
+}
+
+Foo->new->does('Bar');   # true  — Foo declared :does(Bar)
+Foo->new->DOES('Bar');   # false — baz's origin is Foo, not Bar
+```
+
+`->does` is nominal and always reflects the declaration. `->DOES`
+is structural and detects that the contract was broken by the
+exclusion (and subsequent re-implementation with a different
+origin).
+
+### 10.5 Restriction to Classes
+
+`:aliases` and `:excludes` are only available on **classes**, not
+on roles. A role that composes sub-roles should resolve conflicts
+by providing its own methods (the clean algebraic way), not by
+aliasing or excluding. This keeps the role composition graph clean
+and limits contract-breaking to the point of final consumption.
+
+If a role author finds themselves wanting `:excludes`, that is a
+signal that the sub-roles should be refactored. The escape hatch
+is reserved for the class author, who is assembling concrete
+behavior from potentially uncoordinated third-party roles.
+
+### 10.6 Design Rationale
+
+**Why separate attributes, not inline syntax?**
+
+Moose puts aliases and exclusions inside the `with` statement:
+```perl
+with 'Role' => { -alias => { foo => 'role_foo' }, -excludes => ['foo'] };
+```
+
+This spec uses separate `:aliases` and `:excludes` attributes for
+several reasons:
+
+1. **Visibility.** Separate attributes make it immediately obvious
+   that something unusual is happening. They stand out visually as
+   modifications to the normal `:does` contract.
+
+2. **Removability.** When the underlying conflict is fixed in the
+   codebase (roles are refactored, methods renamed, etc.), the
+   `:aliases`/`:excludes` attributes can be deleted independently
+   without modifying the `:does` attribute. This encourages
+   treating them as temporary workarounds.
+
+3. **Clarity of intent.** `:does(Bar, Baz)` states what you want
+   to compose. `:excludes(Baz::gorch)` states what you're working
+   around. Mixing these into a single attribute conflates intent
+   with workaround.
+
+4. **Not a feature to use liberally.** The separate syntax and the
+   required role-qualification (`Bar::baz`, not just `baz`) add
+   deliberate friction. This is an escape hatch, not a composition
+   tool.
+
+---
+
+## 11. Algebraic Properties Summary
 
 ### Method Algebra
 
@@ -782,7 +944,7 @@ its existing `UNIVERSAL::DOES` behavior (backwards compatible).
 
 ---
 
-## 11. Differences from Current Implementation
+## 12. Differences from Current Implementation
 
 The current implementation (`S_class_compose_roles` in `class.c`)
 differs from this specification in several ways:
@@ -824,7 +986,7 @@ differs from this specification in several ways:
 
 ---
 
-## 12. Relationship to Moose Role Composition
+## 13. Relationship to Moose Role Composition
 
 This specification is a direct descendant of Moose's role
 composition model, which itself follows the original traits paper
@@ -832,7 +994,7 @@ composition model, which itself follows the original traits paper
 faithful to what Moose established. This section documents what is
 the same, what differs, and what is new.
 
-### 12.1 Shared Semantics
+### 13.1 Shared Semantics
 
 The following behaviors are identical to Moose:
 
@@ -877,7 +1039,7 @@ The following behaviors are identical to Moose:
   satisfy a required method (from a role or from an unresolved
   conflict), it is a compile-time error.
 
-### 12.2 Differences from Moose
+### 13.2 Differences from Moose
 
 These are behavioral differences, not just implementation details:
 
@@ -888,13 +1050,15 @@ These are behavioral differences, not just implementation details:
    is more natural in core Perl since it mirrors forward
    declarations.
 
-2. **No `-excludes` / `-alias`.** Moose provides these operators
-   at the `:does` (Moose: `with`) site to manage conflicts by
-   excluding or renaming methods before composition. This spec
-   does not yet include these. They are planned for a future
-   revision and will be discussed separately.
+2. **`:aliases`/`:excludes` are separate attributes, not inline.**
+   Moose puts aliases and exclusions inside the `with` statement.
+   This spec provides `:aliases` and `:excludes` as separate
+   class-level attributes (§10), deliberately separated from
+   `:does` to make them visible as workarounds rather than normal
+   composition tools. They are also restricted to classes only —
+   roles cannot use them.
 
-### 12.3 Improvements over Moose
+### 13.3 Improvements over Moose
 
 These are areas where this specification improves upon Moose's
 behavior:
@@ -990,7 +1154,7 @@ structures.
 
 ---
 
-## 13. Worked Examples
+## 14. Worked Examples
 
 ### Example 1: Simple Composition, No Conflicts
 
