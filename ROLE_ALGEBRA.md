@@ -1154,7 +1154,105 @@ structures.
 
 ---
 
-## 14. Worked Examples
+## 14. Implementation Concerns
+
+This section catalogs potential performance and memory concerns
+that should be addressed during implementation. These are not
+blocking issues for the specification — they are recorded here so
+they are not forgotten when the spec moves to implementation.
+
+### 14.1 High Severity
+
+**Pseudo-role per-field overhead (§6).** Every field declaration
+creates a pseudo-role struct (method map, field map, origin
+identity, source location), even bare fields with no attributes.
+A class with 20 fields and no roles still creates 20 pseudo-roles
+and runs the composition fold over all of them. This is
+unconditional cost on the hot path. Worth considering whether
+pseudo-roles should only be created for fields with method-
+generating attributes, with a simpler mechanism for field-field
+conflict detection.
+
+**Diamond field deduplication and index assignment (§5.2).** The
+spec requires that diamond-composed fields occupy a single storage
+slot. The current implementation allocates duplicate slots (known
+limitation). Fixing this requires either detecting diamonds before
+field index assignment, or retroactively reassigning indices —
+which cascades into optree adjustments for every reference to
+those fields.
+
+### 14.2 Medium Severity
+
+**Accessor CVs held from parse to seal time (§6.7).** Currently,
+accessor methods are generated and installed into the stash
+immediately at parse time. The spec holds them in pseudo-role
+structures until seal time. This extends CV lifetime and requires
+cleanup on both success and failure paths.
+
+**Full composed result materialized before resolution (§4–5).**
+The current implementation composes incrementally (install or
+croak). The spec requires materializing the entire composed result
+as a temporary data structure before anything is installed. For
+the common case (1–3 roles, no conflicts) this structure is small,
+but it must still be allocated and freed.
+
+**CV cloning timing relative to diamond detection.** If the
+implementation clones a CV before discovering it is a diamond
+duplicate, the clone is wasted. The composition algebra handles
+diamonds at the abstract level, but the implementation must be
+careful to defer expensive operations (cv_clone, optree walks)
+until after composition determines which items actually need
+installation.
+
+**ADJUST block and method optree adjustment (§7, §8).** Composed
+role methods and ADJUST blocks that reference fields need field
+index adjustments. The current implementation uses runtime magic
+offsets (per-field-access cost). The alternative — compile-time
+optree walks — trades runtime cost for seal-time cost. Either
+way there is a cost, and with diamond composition the dedup check
+must happen before or after the adjustment work.
+
+**Pseudo-role origin identity allocation (§6.2).** Each pseudo-
+role needs a unique, comparable identity token. Since pseudo-roles
+are not real stashes, the implementation needs either synthetic
+allocations or careful pointer-lifetime management.
+
+**`->DOES` runtime method dispatch check (§9.3).** Each `->DOES`
+call walks the role's method table and performs a method resolution
+per entry to check origin identity. This is O(methods × MRO depth)
+at runtime. This is the only runtime concern in the spec —
+everything else is compile-time. If `->DOES` is used in tight
+loops for type-checking, this could be a hot path.
+
+### 14.3 Low Severity
+
+**Error collection data structures (§4.3).** Cold path only
+(errors are rare), but requires a growable structure that is
+either speculatively allocated or lazily initialized.
+
+**Origin sets in Conflicted slots (§2, §3).** Small dynamically-
+sized collections per conflicted slot, requiring heap allocation
+and linear scans for dedup during set union. In practice N is
+very small.
+
+**`:aliases`/`:excludes` requiring mutable role copy (§10).**
+These transforms cannot mutate the original role's stash (the role
+may be composed elsewhere). Requires materializing a mutable copy
+of the role's method map for this consumer. Rare escape hatch,
+cold path.
+
+**Intermediate fold results during multi-role composition (§5.1).**
+Folding N roles produces N−1 intermediate composed structures.
+Each must be freed promptly after the next fold step completes.
+
+**MRO walking for inherited method satisfaction (§4.2.1).**
+Checking `can()` for each unsatisfied Required slot walks the MRO.
+Bounded by the typically small number of required methods and
+shallow hierarchies.
+
+---
+
+## 15. Worked Examples
 
 ### Example 1: Simple Composition, No Conflicts
 
