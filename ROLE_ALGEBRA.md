@@ -603,7 +603,162 @@ traits paper):
 
 ---
 
-## 9. Algebraic Properties Summary
+## 9. `->does` and `->DOES` Semantics
+
+Role composition introduces two runtime query methods with
+deliberately different semantics: one nominal (reflects programmer
+intent) and one structural (verifies contract fulfillment).
+
+### 9.1 `:does` — Compile-Time Declaration
+
+The `:does(RoleName)` attribute on a class or role is a compile-time
+declaration of intent: "I compose this role." It is the input to
+the composition algorithm.
+
+### 9.2 `->does('RoleName')` — Nominal Check
+
+`$obj->does('RoleName')` (and `ClassName->does('RoleName')`)
+returns true if and only if the class declared `:does(RoleName)`,
+directly or transitively through another composed role.
+
+This is a **nominal** check. It echoes what the programmer wrote.
+It does not verify that the role's contract is actually fulfilled
+at runtime — because the class may have overridden role methods,
+a subclass may have overridden them further, or future features
+like `-alias`/`-exclude` may have altered the composition.
+
+`->does` answers: *"Did the programmer declare this relationship?"*
+
+### 9.2.1 `does` as Infix Operator
+
+Perl 5.36+ provides `isa` as an infix operator:
+```perl
+if ($obj isa ClassName) { ... }
+```
+
+We add `does` as an infix operator with the same pattern:
+```perl
+if ($obj does RoleName) { ... }
+```
+
+This is syntactic sugar for `$obj->does('RoleName')` — it is the
+nominal check. It follows the same precedence and semantics as
+infix `isa`, but checks role composition rather than class
+inheritance.
+
+Like `isa`, the right-hand side is a bareword (package name), not
+a string. This makes it a natural companion:
+
+```perl
+if ($obj isa Widget)      { ... }  # class check
+if ($obj does Drawable)   { ... }  # role check (nominal)
+```
+
+### 9.3 `->DOES('RoleName')` — Structural Contract Check
+
+`$obj->DOES('RoleName')` returns true if and only if the object
+actually fulfills the role's complete interface contract right now.
+
+This is a **strict structural check**. It inspects the role's
+interface and verifies each slot against the object's actual method
+dispatch table:
+
+**For each Defined(name, origin) method in the role:**
+The method that `$obj->name` would dispatch to must have the
+same origin stash as the role's method. That is, the role's
+original implementation is still the one that would be called —
+it has not been overridden by the class, a subclass, or any
+other mechanism.
+
+**For each Required(name) method in the role:**
+`$obj->can(name)` must return true. Some implementation must
+exist. (Since the role never provided an implementation, any
+concrete method satisfies this — the role only cares that the
+method is available, not who wrote it.)
+
+`->DOES` answers: *"Does this object actually fulfill the
+contract?"*
+
+### 9.4 When They Disagree
+
+`->does` and `->DOES` can legitimately return different values:
+
+```perl
+role Drawable {
+    method draw { ... }       # Defined(draw, Drawable)
+    method visible;           # Required(visible)
+}
+
+class Widget :does(Drawable) {
+    method visible { 1 }      # satisfies requirement
+}
+# Widget->new->does('Drawable')  → true  (declared)
+# Widget->new->DOES('Drawable')  → true  (contract fulfilled:
+#   draw is Drawable's CV, visible is provided)
+
+class FancyWidget :isa(Widget) {
+    method draw { ... }       # overrides Drawable's draw
+}
+# FancyWidget->new->does('Drawable')  → true  (inherited declaration)
+# FancyWidget->new->DOES('Drawable')  → false (draw's origin is
+#   now FancyWidget, not Drawable — contract broken)
+```
+
+The subclass broke the contract *at a distance*. `->does` still
+returns true because Widget declared `:does(Drawable)` and
+FancyWidget inherits that declaration. `->DOES` returns false
+because the structural check fails — `draw` no longer dispatches
+to Drawable's implementation.
+
+Similarly, a class method override breaks the contract:
+
+```perl
+class Button :does(Drawable) {
+    method visible { 1 }
+    method draw { ... }       # overrides Drawable's draw
+}
+# Button->new->does('Drawable')  → true   (declared)
+# Button->new->DOES('Drawable')  → false  (draw overridden)
+```
+
+This is intentional. `:does` is a statement of intent; `->does`
+echoes it. `->DOES` is a verification tool — it tells you whether
+the intent is actually being honored at runtime.
+
+### 9.5 Transitivity
+
+Both `->does` and `->DOES` are transitive, but in different ways:
+
+**`->does` follows the composition graph.**
+If `role A :does(B)` and `class C :does(A)`, then
+`C->new->does('B')` is true because B was transitively composed
+through A.
+
+**`->DOES` checks each role's contract independently.**
+`C->new->DOES('B')` verifies B's interface against the object
+directly — it does not matter that B was composed through A. If
+B defines `method m` and that method has been overridden somewhere
+in the chain, `->DOES('B')` returns false regardless of how B
+was originally composed in.
+
+This independence is the key property: `->DOES` is a pure
+structural check. It doesn't care about composition history. It
+looks at the role's interface, looks at the object's dispatch
+table, and checks whether they match.
+
+### 9.6 Relationship to `UNIVERSAL::DOES`
+
+Perl's existing `UNIVERSAL::DOES` (from Perl 5.10) is a nominal
+check — it defaults to the same behavior as `isa`. Our `->DOES`
+on role-aware classes overrides this with the strict structural
+semantics described above.
+
+For classes that do not use `feature 'class'`, `->DOES` retains
+its existing `UNIVERSAL::DOES` behavior (backwards compatible).
+
+---
+
+## 10. Algebraic Properties Summary
 
 ### Method Algebra
 
@@ -627,7 +782,7 @@ traits paper):
 
 ---
 
-## 10. Differences from Current Implementation
+## 11. Differences from Current Implementation
 
 The current implementation (`S_class_compose_roles` in `class.c`)
 differs from this specification in several ways:
@@ -669,7 +824,173 @@ differs from this specification in several ways:
 
 ---
 
-## 11. Worked Examples
+## 12. Relationship to Moose Role Composition
+
+This specification is a direct descendant of Moose's role
+composition model, which itself follows the original traits paper
+(Schärli et al., 2003). The core semantics are intentionally
+faithful to what Moose established. This section documents what is
+the same, what differs, and what is new.
+
+### 12.1 Shared Semantics
+
+The following behaviors are identical to Moose:
+
+- **Origin-based identity.** Two methods conflict if they have the
+  same name but originate from different packages. Two methods from
+  the same origin (diamond case) compose idempotently.
+
+- **Class methods take precedence over role methods.** A class that
+  provides its own method with the same name as a role method wins.
+  The role method is not installed.
+
+- **Class methods resolve conflicts.** When two roles provide
+  conflicting methods, the class can resolve the conflict by
+  providing its own implementation.
+
+- **Roles can resolve sub-role conflicts.** A composite role that
+  provides its own method resolves conflicts among its composed
+  sub-roles, just as a class would.
+
+- **Required methods propagate through roles.** A required method
+  that is not satisfied during role-into-role composition becomes
+  a requirement of the composite role.
+
+- **Concrete methods satisfy requirements.** A concrete method from
+  one role satisfies a required method from another role during
+  composition.
+
+- **Inherited methods satisfy requirements.** A method inherited
+  from the superclass chain satisfies a Required slot. (Moose uses
+  `->can()` for this check.)
+
+- **Inherited methods do NOT resolve conflicts.** A method inherited
+  from the superclass does not resolve a method conflict between
+  roles. The class must explicitly provide its own method.
+
+- **Conflicting methods become required.** When two roles conflict
+  on a method, the consumer must provide an implementation. In
+  Moose this is implicit (croak unless resolved); in this spec the
+  Conflicted state carries an explicit requirement.
+
+- **Required methods in classes are errors.** If a class fails to
+  satisfy a required method (from a role or from an unresolved
+  conflict), it is a compile-time error.
+
+### 12.2 Differences from Moose
+
+These are behavioral differences, not just implementation details:
+
+1. **`requires` syntax.** Moose uses an explicit `requires 'foo'`
+   declaration. Perl 5 core uses a bodyless method stub:
+   `method foo;`. The semantics are identical — both declare an
+   obligation without providing an implementation. The stub form
+   is more natural in core Perl since it mirrors forward
+   declarations.
+
+2. **No `-excludes` / `-alias`.** Moose provides these operators
+   at the `:does` (Moose: `with`) site to manage conflicts by
+   excluding or renaming methods before composition. This spec
+   does not yet include these. They are planned for a future
+   revision and will be discussed separately.
+
+### 12.3 Improvements over Moose
+
+These are areas where this specification improves upon Moose's
+behavior:
+
+**1. All errors reported at once.**
+
+Moose croaks on the first composition error (conflict or
+unsatisfied requirement), forcing the developer to fix one problem,
+recompile, discover the next, fix it, recompile, and so on.
+
+This spec collects all composition errors — method conflicts,
+unsatisfied requirements, and field conflicts — and reports them
+together in a single diagnostic. This is especially valuable when
+composing many roles, where multiple independent problems may exist
+simultaneously.
+
+```
+# Moose: you see this first...
+#   'foo' conflicts between Role::A and Role::B
+# ...fix it, recompile, then discover...
+#   'bar' requires method 'baz'
+
+# This spec: you see everything at once
+#   Role composition errors in class Widget:
+#     - Method 'foo' conflicts between Role::A and Role::B
+#     - Method 'baz' is required by Role::Bar but not provided
+#     - Field '$id' conflicts between Role::A and Role::C
+```
+
+**2. Field (attribute) conflict detection.**
+
+Moose has no conflict detection for attributes. When two roles
+provide an attribute with the same name, one silently wins
+(last-applied). This can cause subtle bugs where a role's
+attribute (with its default, type constraint, and builder) is
+quietly replaced by another role's version.
+
+```perl
+# Moose: no error, Logger's $level silently replaces Prioritized's
+package Prioritized { use Moose::Role; has 'level' => (is => 'ro', default => 1); }
+package Logger     { use Moose::Role; has 'level' => (is => 'ro', default => 'info'); }
+package MyApp      { use Moose; with 'Prioritized', 'Logger'; }
+```
+
+This spec treats fields as first-class participants in the
+composition algebra. Field conflicts (same name, different origin)
+are always errors, because fields allocate object storage and
+cannot be meaningfully "overridden."
+
+**3. Accessor method conflict detection via pseudo-roles.**
+
+In Moose, attribute accessors are installed into the stash as
+regular methods. This means they participate in method conflict
+detection between roles — but only incidentally. The connection
+between an accessor method and its originating attribute is lost
+in error messages, and conflicts between accessors within the
+same class are not detected at all.
+
+This spec bundles each field and its generated accessor methods
+into a pseudo-role (§6). This provides:
+
+- **Same-class accessor conflicts caught.** Two fields in the same
+  class that generate methods with the same name (e.g.,
+  `field $x :reader` and `field @x :reader`) are detected as
+  conflicts rather than silently overwriting.
+
+- **Rich error messages.** Because the pseudo-role tracks which
+  field declaration and which attribute generated each method,
+  error messages can explain *why* a method exists:
+  `Method 'x' conflicts between :reader for field '$x' and
+  :reader for field '@x'`
+  rather than just naming two packages.
+
+- **Unified composition pipeline.** Class fields, role fields, and
+  their accessor methods all flow through the same algebra. There
+  is no special case for "class-local accessors" vs "role-composed
+  methods" — they are all slots in roles (real or pseudo) and
+  compose by the same rules.
+
+**4. Explicit algebraic model.**
+
+Moose's role composition is implemented procedurally: walk the
+roles, check for conflicts, croak or install. The logic is spread
+across `Moose::Meta::Role::Application::*` classes and interleaved
+with Moose's meta-object protocol.
+
+This spec defines composition as a pure, total algebraic operation
+(§2–§3) separate from resolution (§4). This separation makes the
+semantics easier to reason about, test, and verify. The algebra
+can be tested independently of the resolution policy, and the
+resolution policy can be tested against known-good composed
+structures.
+
+---
+
+## 13. Worked Examples
 
 ### Example 1: Simple Composition, No Conflicts
 
