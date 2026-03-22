@@ -1,6 +1,6 @@
 #!/usr/bin/perl
 
-use v5.36;
+use v5.42;
 use feature 'class';
 no warnings 'experimental::class';
 
