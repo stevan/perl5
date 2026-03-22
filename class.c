@@ -1073,25 +1073,17 @@ S_class_compose_roles(pTHX_ HV *stash)
                         PadnameSV(rolepn),
                         newSVuv(PTR2UV(PadnameFIELDINFO(rolepn)->fieldstash)), 0);
 
-                    /* Update field metadata with offset fieldix */
-                    {
-                        PADOFFSET orig_fieldix = PadnameFIELDINFO(rolepn)->fieldix;
-                        PADOFFSET fieldix = orig_fieldix + fieldix_offset;
-
-                        if(fieldix >= aux->xhv_class_next_fieldix)
-                            aux->xhv_class_next_fieldix = fieldix + 1;
-
-                        /* Add to param_map so the constructor knows about
-                         * these params (for extraction and unknown-param
-                         * validation). The role's initfields CV handles the
-                         * actual initialization. */
-                        if(PadnameFIELDINFO(rolepn)->paramname) {
-                            if(!aux->xhv_class_param_map)
-                                aux->xhv_class_param_map = newHV();
-                            (void)hv_store_ent(aux->xhv_class_param_map,
-                                PadnameFIELDINFO(rolepn)->paramname,
-                                newSVuv(fieldix), 0);
-                        }
+                    /* Add to param_map so the constructor knows about
+                     * these params (for extraction and unknown-param
+                     * validation). The role's initfields CV handles the
+                     * actual initialization. */
+                    if(PadnameFIELDINFO(rolepn)->paramname) {
+                        PADOFFSET fieldix = PadnameFIELDINFO(rolepn)->fieldix + fieldix_offset;
+                        if(!aux->xhv_class_param_map)
+                            aux->xhv_class_param_map = newHV();
+                        (void)hv_store_ent(aux->xhv_class_param_map,
+                            PadnameFIELDINFO(rolepn)->paramname,
+                            newSVuv(fieldix), 0);
                     }
 
                     next_field: ;
@@ -1099,8 +1091,37 @@ S_class_compose_roles(pTHX_ HV *stash)
             }
         }
 
+        /* Advance next_fieldix past all of this role's fields, including
+         * any transitively composed fields that aren't in its own
+         * xhv_class_fields list. The role's xhv_class_next_fieldix is
+         * the total slot count (own + composed) determined at role seal time. */
+        {
+            PADOFFSET role_end = fieldix_offset + roleaux->xhv_class_next_fieldix;
+            if(role_end > aux->xhv_class_next_fieldix)
+                aux->xhv_class_next_fieldix = role_end;
+        }
+
+        /* Propagate the role's param_map to the consumer. This handles
+         * transitively composed :param fields that are in the role's
+         * param_map but not in its xhv_class_fields (because the role
+         * composed them from a sub-role). */
+        if(roleaux->xhv_class_param_map) {
+            if(!aux->xhv_class_param_map)
+                aux->xhv_class_param_map = newHV();
+            hv_iterinit(roleaux->xhv_class_param_map);
+            HE *he;
+            while((he = hv_iternext(roleaux->xhv_class_param_map))) {
+                SV *key = HeSVKEY_force(he);
+                if(!hv_exists_ent(aux->xhv_class_param_map, key, 0)) {
+                    PADOFFSET fieldix = SvUV(HeVAL(he)) + fieldix_offset;
+                    (void)hv_store_ent(aux->xhv_class_param_map,
+                        key, newSVuv(fieldix), 0);
+                }
+            }
+        }
+
         /* --- Chain the role's initfields CV --- */
-        if(roleaux->xhv_class_initfields_cv && roleaux->xhv_class_fields) {
+        if(roleaux->xhv_class_initfields_cv) {
             CV *initcv = roleaux->xhv_class_initfields_cv;
 
             if(fieldix_offset > 0) {
