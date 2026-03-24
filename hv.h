@@ -115,6 +115,8 @@ union xhvnameu_ {
 /* A struct defined by pad.h and used within class.c */
 struct suspended_compcv;
 
+struct proto_role;  /* forward declaration; full definition in class.h */
+
 struct xpvhv_aux {
     union xhvnameu_ xhv_name_u;	/* name, if a symbol table */
     AV		*xhv_backreferences; /* back references for weak references */
@@ -150,6 +152,8 @@ struct xpvhv_aux {
 
     AV          *xhv_class_pending_roles;      /* role stashes pending composition */
     AV          *xhv_class_roles;              /* composed role stashes (for DOES) */
+
+    struct proto_role *xhv_class_proto_role;   /* proto-role for composition algebra */
 };
 
 #define HvAUXf_SCAN_STASH   0x1   /* stash is being scanned by gv_check */
