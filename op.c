@@ -8587,7 +8587,7 @@ Perl_utilize(pTHX_ int aver, I32 floor, OP *version, OP *idop, OP *arg)
             }
             else {
                 /* OK let's at least warn */
-                deprecate_fatal_in(WARN_DEPRECATED__SUBSEQUENT_USE_VERSION, "5.44",
+                deprecate_fatal_in(WARN_DEPRECATED__SUBSEQUENT_USE_VERSION, "5.46",
                     "Changing use VERSION while another use VERSION is in scope");
             }
         }
@@ -15238,6 +15238,7 @@ Perl_find_lexical_cv(pTHX_ PADOFFSET off)
                 if (thisname && PadnameLEN(thisname) == PadnameLEN(name)
                     && PadnamePV(thisname) == PadnamePV(name)) {
                     name = thisname;
+                    off = offset;
                     break;
                 }
             }
