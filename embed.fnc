@@ -3417,11 +3417,11 @@ ARdp	|bool	|sv_does_pvn	|NN SV *sv				\
 				|NN const char * const name		\
 				|const STRLEN len			\
 				|U32 flags
+ARdp	|bool	|sv_does_role_sv|NN SV *sv				\
+				|NN SV *namesv
 ARdp	|bool	|sv_does_sv	|NN SV *sv				\
 				|NN SV *namesv				\
 				|U32 flags
-ARdp	|bool	|sv_does_role_sv|NN SV *sv				\
-				|NN SV *namesv
 Adp	|void	|sv_dump	|NULLOK SV *sv
 Adp	|void	|sv_dump_depth	|NULLOK SV *sv				\
 				|I32 depth
