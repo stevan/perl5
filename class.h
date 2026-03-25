@@ -9,8 +9,9 @@
 
 /* Proto-role types and composition helpers for `use feature 'class'`.
  *
- * This header is included only from class.c. The proto_role_t pointer
- * in struct xpvhv_aux (hv.h) uses a forward declaration.
+ * Included from class.c (composition pipeline) and universal.c
+ * (structural DOES check). The proto_role_t pointer in struct xpvhv_aux
+ * (hv.h) uses a forward declaration.
  *
  * The proto-role is the intermediate representation through which all
  * fields and methods flow during class/role construction and composition.

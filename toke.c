@@ -8659,6 +8659,9 @@ yyl_word_or_keyword(pTHX_ char *s, STRLEN len, I32 key, I32 orig_keyword, struct
     case KEY_dbmclose:
         UNI(OP_DBMCLOSE);
 
+    case KEY_does:
+        NCRop(OP_DOES);
+
     case KEY_dump:
         LOOPX(OP_DUMP);
 
