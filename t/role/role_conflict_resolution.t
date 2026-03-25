@@ -118,4 +118,50 @@ use Test::More;
     like($@, qr/required.*not provided/i, "unsatisfied required method is an error");
 }
 
+# Inherited method (from superclass) satisfies a Required slot
+{
+    role NeedsRender10 {
+        method render;
+    }
+
+    class BaseRenderer10 {
+        method render { "from base" }
+    }
+
+    class FancyRenderer10 :isa(BaseRenderer10) :does(NeedsRender10) { }
+
+    is(FancyRenderer10->new->render, "from base",
+        "inherited method satisfies Required slot");
+}
+
+# Inherited method does NOT resolve a Conflicted slot
+{
+    role Talker11a { method speak { "A" } }
+    role Talker11b { method speak { "B" } }
+
+    class BaseSpeaker11 {
+        method speak { "base" }
+    }
+
+    eval q{
+        class ChildSpeaker11 :isa(BaseSpeaker11) :does(Talker11a) :does(Talker11b) { }
+    };
+    like($@, qr/conflict/i,
+        "inherited method does NOT resolve Conflicted slot");
+}
+
+# Consumer's generated accessor does NOT resolve a method conflict
+{
+    role Source12a { method value { "A" } }
+    role Source12b { method value { "B" } }
+
+    eval q{
+        class Consumer12 :does(Source12a) :does(Source12b) {
+            field $value :param :reader;  # generated accessor, not an explicit resolution
+        }
+    };
+    like($@, qr/conflict/i,
+        "consumer generated accessor does NOT resolve method conflict");
+}
+
 done_testing;

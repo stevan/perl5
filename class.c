@@ -1524,8 +1524,13 @@ S_proto_role_compose_and_install(pTHX_ HV *stash)
         struct xpvhv_aux *roleaux = HvAUX(rolestash);
 
         if (!roleaux->xhv_class_proto_role) {
-            /* Role doesn't have a proto-role yet (shouldn't happen for
-             * properly sealed roles, but fall back to old path) */
+            /* Role doesn't have a proto-role (shouldn't happen for roles
+             * sealed by this build; falling back to legacy composition) */
+#ifdef DEBUGGING
+            Perl_warn(aTHX_ "proto_role_compose_and_install: role %" HvNAMEf_QUOTEDPREFIX
+                      " has no proto-role; falling back to legacy composition path",
+                      HvNAMEfARG(rolestash));
+#endif
             Safefree(all_roles);
             goto fallback;
         }
